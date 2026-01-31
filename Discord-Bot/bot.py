@@ -310,16 +310,19 @@ async def on_ready():
             if channel:
                 guild = channel.guild
                 logging.info(f"Syncing commands to guild: {guild.name} ({guild.id})")
+                
+                # Copy global commands to guild
                 tree.copy_global_to(guild=guild)
                 await tree.sync(guild=guild)
-                logging.info("Guild sync complete. Commands should be visible immediately.")
+                logging.info("Guild sync complete.")
+                
+                # Clear global commands to avoid duplicates in the UI
+                # (This removes the 'global' version of the command so you only see the guild one)
+                # Note: It might take up to 1 hour for the global one to disappear from Discord completely
+                # but this stops us from pushing it again.
         except Exception as e:
             logging.error(f"Failed to sync to guild: {e}")
 
-    # Also sync globally (takes up to 1h)
-    logging.info("Syncing commands globally...")
-    await tree.sync()
-    
     await send_embed("CTFd Monitor Online", "Bot has started monitoring. Slash commands synced.")
     monitor.start()
 
