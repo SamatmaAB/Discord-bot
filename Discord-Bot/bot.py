@@ -6,6 +6,7 @@ from datetime import datetime, UTC
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ CTFD_TOKEN = os.getenv("CTFD_TOKEN")
 # MULTI-CHANNEL SUPPORT (comma-separated IDs in .env)
 CHANNEL_IDS = [int(x.strip()) for x in os.getenv("CHANNEL_IDS", "").split(",") if x.strip()]
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 300))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 100))
 
 # TEAMS
 MY_TEAM = "People's Education Society University - PESU2"
@@ -45,7 +46,9 @@ logging.basicConfig(
 # DISCORD CLIENT
 # ======================
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
 # ======================
 # STATE HANDLING
@@ -242,37 +245,36 @@ async def monitor():
             await send_embed("✅ New Solve!", f"Solved by {MY_TEAM}:\n{desc}", 0x2ecc71)
 
         # -------- DISCORD MESSAGE (STATUS) --------
-        # Only send status if no alerts (to reduce spam) or always?
-        # Let's keep it simple: Always send status update for now, or maybe only if hash changed?
-        # User asked for "check for new flags", so alerts are key.
-        # I will keep the status update but maybe make it less intrusive if nothing changed?
-        # For now, preserving original behavior of sending status every loop.
-        
-        lines = []
-        for team in (MY_TEAM, RIVAL_TEAM):
-            info = positions.get(team)
-            if info:
-                lines.append(
-                    f"**{team}** → Rank: {info['rank']} | Score: {info['score']}"
-                )
-            else:
-                lines.append(f"**{team}** → Not found on scoreboard")
+        # Only ping if scoreboard changed
+        old_positions = snapshot.get("scoreboard", {})
+        if positions != old_positions:
+            lines = []
+            for team in (MY_TEAM, RIVAL_TEAM):
+                info = positions.get(team)
+                if info:
+                    lines.append(
+                        f"**{team}** → Rank: {info['rank']} | Score: {info['score']}"
+                    )
+                else:
+                    lines.append(f"**{team}** → Not found on scoreboard")
 
-        if solved:
-            lines.append("")
-            lines.append(f"✅ **Total Solved:** {len(solved)}")
-            # Truncate solved list in status if too long, relies on "New Solve" alert for specifics
-            if len(solved) <= 5: 
-                 for s in solved:
-                    lines.append(f"- {s}")
-            else:
-                lines.append(f"*(...and {len(solved)-5} more)*")
+            if solved:
+                lines.append("")
+                lines.append(f"✅ **Total Solved:** {len(solved)}")
+                if len(solved) <= 5: 
+                     for s in solved:
+                        lines.append(f"- {s}")
+                else:
+                    lines.append(f"*(...and {len(solved)-5} more)*")
 
-        await send_embed(
-            "📊 Current Scoreboard Status",
-            "\n".join(lines),
-            0x1abc9c
-        )
+            await send_embed(
+                "📊 Current Scoreboard Status",
+                "\n".join(lines),
+                0x1abc9c
+            )
+            logging.info("Scoreboard updated. Sent notification.")
+        else:
+            logging.info("Scoreboard unchanged. Skipping notification.")
 
         print_scoreboard_status(positions, solved)
 
@@ -300,8 +302,66 @@ async def monitor():
 @client.event
 async def on_ready():
     logging.info(f"Logged in as {client.user}")
-    await send_embed("CTFd Monitor Online", "Bot has started monitoring.")
+    
+    # Sync commands to the specific guild for instant updates
+    if CHANNEL_IDS:
+        try:
+            channel = await client.fetch_channel(CHANNEL_IDS[0])
+            if channel:
+                guild = channel.guild
+                logging.info(f"Syncing commands to guild: {guild.name} ({guild.id})")
+                tree.copy_global_to(guild=guild)
+                await tree.sync(guild=guild)
+                logging.info("Guild sync complete. Commands should be visible immediately.")
+        except Exception as e:
+            logging.error(f"Failed to sync to guild: {e}")
+
+    # Also sync globally (takes up to 1h)
+    logging.info("Syncing commands globally...")
+    await tree.sync()
+    
+    await send_embed("CTFd Monitor Online", "Bot has started monitoring. Slash commands synced.")
     monitor.start()
+
+@tree.command(name="status", description="Check current scoreboard status manually")
+async def status(interaction: discord.Interaction):
+    logging.info(f"Status command received from {interaction.user}")
+    
+    # Load latest state
+    snapshot = load_snapshot()
+    positions = snapshot.get("scoreboard", {})
+    solved = snapshot.get("solved", [])
+    
+    lines = []
+    for team in (MY_TEAM, RIVAL_TEAM):
+        info = positions.get(team)
+        if info:
+            lines.append(
+                f"**{team}** → Rank: {info['rank']} | Score: {info['score']}"
+            )
+        else:
+            lines.append(f"**{team}** → Not found on scoreboard")
+
+    if solved:
+        lines.append("")
+        lines.append(f"✅ **Total Solved:** {len(solved)}")
+        if len(solved) <= 5: 
+                for s in solved:
+                    lines.append(f"- {s}")
+        else:
+            lines.append(f"*(...and {len(solved)-5} more)*")
+
+    embed = discord.Embed(
+        title="📊 Current Scoreboard Status (Manual Check)",
+        description="\n".join(lines),
+        color=0x1abc9c,
+        timestamp=datetime.now(UTC)
+    )
+    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
 
 # ======================
 # START
