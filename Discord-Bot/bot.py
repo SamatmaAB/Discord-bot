@@ -29,6 +29,7 @@ RIVAL_TEAM = "People's Education Society University - PESU1"
 
 SNAPSHOT_FILE = "snapshot.json"
 CTFD_BASE = "https://ectf.ctfd.io"
+REMOTE_SCENARIO_URL = "https://rules.ectf.mitre.org/2026/flags/remote_scenario.html"
 
 # SCOREBOARD PAGINATION
 PER_PAGE = 100
@@ -59,7 +60,8 @@ def load_snapshot():
             "hash": None,
             "challenges": [],
             "scoreboard": {},
-            "solved": []
+            "solved": [],
+            "remote_scenario_hash": None
         }
 
     try:
@@ -71,7 +73,8 @@ def load_snapshot():
             "hash": None,
             "challenges": [],
             "scoreboard": {},
-            "solved": []
+            "solved": [],
+            "remote_scenario_hash": None
         }
 
 def save_snapshot(data):
@@ -99,6 +102,13 @@ async def fetch_json(url):
         async with session.get(url, headers=auth_headers()) as resp:
             resp.raise_for_status()
             return await resp.json()
+
+async def fetch_html(url):
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            return await resp.text()
 
 async def fetch_challenges():
     return await fetch_json(f"{CTFD_BASE}/api/v1/challenges")
@@ -167,6 +177,18 @@ async def extract_team_positions(my_team, rival_team):
 def hash_content(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+async def check_remote_scenario():
+    """Fetch and extract remote scenario section from the rules page."""
+    try:
+        html = await fetch_html(REMOTE_SCENARIO_URL)
+        # Look for the remote-scenario section
+        if '<section id="remote-scenario">' in html:
+            return html
+        return None
+    except Exception as e:
+        logging.error(f"Failed to fetch remote scenario: {e}")
+        return None
+
 # ======================
 # TERMINAL PRINT
 # ======================
@@ -181,7 +203,7 @@ def print_scoreboard_status(status, solved):
 # ======================
 # DISCORD MESSAGING
 # ======================
-async def send_embed(title, description, color=0x3498db):
+async def send_embed(title, description, color=0x3498db, ping=False):
     for channel_id in CHANNEL_IDS:
         try:
             channel = await client.fetch_channel(channel_id)
@@ -197,7 +219,8 @@ async def send_embed(title, description, color=0x3498db):
         )
         embed.set_footer(text="CTFd Monitor")
 
-        await channel.send(embed=embed)
+        content = "@everyone" if ping else None
+        await channel.send(content=content, embed=embed)
 
 # ======================
 # MONITOR LOOP
@@ -235,14 +258,29 @@ async def monitor():
             RIVAL_TEAM
         )
 
+        # -------- REMOTE SCENARIO --------
+        remote_scenario_content = await check_remote_scenario()
+        remote_scenario_hash = None
+        if remote_scenario_content:
+            remote_scenario_hash = hash_content(remote_scenario_content)
+            old_remote_hash = snapshot.get("remote_scenario_hash")
+            if old_remote_hash and remote_scenario_hash != old_remote_hash:
+                await send_embed(
+                    "🚀 Remote Challenges LIVE!",
+                    "@everyone get your attack boards ready, remote challenges just dropped!",
+                    0xff9800,
+                    ping=True
+                )
+                logging.info("Remote scenario updated. Sent notification.")
+
         # -------- ALERTS --------
         if new_challenges:
             desc = "\n".join([f"**{c['name']}** ({c['category']}) - {c['value']} pts" for c in new_challenges])
-            await send_embed("🚨 NEW CHALLENGE RELEASED!", desc, 0xe74c3c)
+            await send_embed("🚨 NEW CHALLENGE RELEASED!", desc, 0xe74c3c, ping=True)
 
         if new_solves:
             desc = "\n".join([f"**{s}**" for s in new_solves])
-            await send_embed("✅ New Solve!", f"Solved by {MY_TEAM}:\n{desc}", 0x2ecc71)
+            await send_embed("✅ New Solve!", f"Solved by {MY_TEAM}:\n{desc}", 0x2ecc71, ping=True)
 
         # -------- DISCORD MESSAGE (STATUS) --------
         # Only ping if scoreboard changed
@@ -270,7 +308,8 @@ async def monitor():
             await send_embed(
                 "📊 Current Scoreboard Status",
                 "\n".join(lines),
-                0x1abc9c
+                0x1abc9c,
+                ping=True
             )
             logging.info("Scoreboard updated. Sent notification.")
         else:
@@ -283,7 +322,8 @@ async def monitor():
             "hash": page_hash,
             "challenges": challenges,
             "scoreboard": positions,
-            "solved": solved
+            "solved": solved,
+            "remote_scenario_hash": remote_scenario_hash
         })
 
         logging.info("Check complete")
@@ -363,6 +403,60 @@ async def status(interaction: discord.Interaction):
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
     
     await interaction.response.send_message(embed=embed)
+
+@tree.command(name="temp", description="Check Raspberry Pi temperature")
+async def check_temp(interaction: discord.Interaction):
+    logging.info(f"Temp command received from {interaction.user}")
+    
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["vcgencmd", "measure_temp"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            # Output format: "temp=54.0'C"
+            temp_str = result.stdout.strip().split("=")[1].replace("'C", "")
+            temp = float(temp_str)
+        else:
+            # Fallback: read from thermal zone
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                temp_millic = int(f.read().strip())
+                temp = temp_millic / 1000.0
+        
+        # Determine status color
+        if temp >= 85:
+            color = 0xe74c3c  # Red
+            status = "🔥 OVERHEATING"
+        elif temp >= 70:
+            color = 0xf39c12  # Orange
+            status = "⚠️ WARM"
+        else:
+            color = 0x2ecc71  # Green
+            status = "❄️ COOL"
+        
+        embed = discord.Embed(
+            title="🌡️ Raspberry Pi Temperature",
+            description=f"Current Temperature: **{temp}°C**\nStatus: {status}",
+            color=color,
+            timestamp=datetime.now(UTC)
+        )
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logging.error(f"Failed to get temperature: {e}")
+        embed = discord.Embed(
+            title="🌡️ Temperature Check Failed",
+            description=f"Error: {str(e)}",
+            color=0xe74c3c,
+            timestamp=datetime.now(UTC)
+        )
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+        await interaction.response.send_message(embed=embed)
 
 
 
