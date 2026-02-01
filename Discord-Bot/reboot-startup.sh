@@ -3,7 +3,7 @@
 # Cron job for Pi reboot - starts Discord bot and temperature manager
 # This script should be placed in /etc/cron.d/ or added to root's crontab
 
-cd /home/pi/Discord-Bot
+cd /home/pesu2/Discord-bot/Discord-bot
 
 # Kill any existing sessions to avoid duplicates
 tmux kill-session -t temp_manager 2>/dev/null

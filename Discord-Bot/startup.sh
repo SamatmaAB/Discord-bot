@@ -4,7 +4,7 @@
 # This script starts both the temperature manager and bot in tmux sessions
 # Run this on Pi startup or manually
 
-cd /home/pi/Discord-Bot  # Change this to your actual path
+cd /home/pesu2/Discord-bot/Discord-bot
 
 # Kill existing sessions if they exist
 tmux kill-session -t temp_manager 2>/dev/null
